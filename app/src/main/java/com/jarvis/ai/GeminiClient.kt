@@ -17,17 +17,25 @@ class GeminiClient(private val apiKey: String) {
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    // સાચું મોડલ જે AQ. કી સાથે કામ કરે છે
-    private val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    // તમારું વેરિફાઈ થયેલું એન્ડપોઈન્ટ
+    private val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent"
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
     private val systemInstruction = """
         You are Jarvis, a voice-controlled Android phone assistant.
         Use the control_phone tool to perform actions on the device.
-        Actions: click, type, scroll_down, scroll_up, back, home, recents,
-        open_app, search_web, torch, volume_up, volume_down, volume_mute, call.
+        Available actions:
+        - click (target: exact text on screen to click)
+        - type (target: text to type into focused input field)
+        - scroll_down, scroll_up, back, home, recents (no target needed)
+        - open_app (target: app name like "YouTube", "WhatsApp")
+        - search_web (target: search query)
+        - torch (target: "on" or "off")
+        - volume_up, volume_down, volume_mute (no target)
+        - call (target: phone number)
         Keep spoken responses SHORT (1-2 sentences).
         Reply in the same language as the user (English, Hindi, or Gujarati).
+        If the action succeeded, confirm briefly. If just chatting, reply concisely.
     """.trimIndent()
 
     suspend fun processCommand(
@@ -153,16 +161,23 @@ class GeminiClient(private val apiKey: String) {
             })
         }
 
-        // નવી AQ કી માટે હેડરનો ઉપયોગ
         val request = Request.Builder()
             .url(endpoint)
-            .addHeader("x-goog-api-key", apiKey)
+            .addHeader("x-goog-api-key", apiKey) // વેરિફાઈ થયેલી કી માટે હેડર
             .post(body.toString().toRequestBody(jsonType))
             .build()
 
         client.newCall(request).execute().use { response ->
             val bodyStr = response.body?.string() ?: ""
-            if (!response.isSuccessful) throw Exception("API ${response.code}: ${bodyStr.take(200)}")
+            if (!response.isSuccessful) {
+                when (response.code) {
+                    400 -> throw Exception("Bad Request. Check your command.")
+                    401 -> throw Exception("API Key invalid or expired.")
+                    403 -> throw Exception("Permission denied. Check API settings.")
+                    429 -> throw Exception("Too many requests. Wait a moment.")
+                    else -> throw Exception("API ${response.code}: ${bodyStr.take(100)}")
+                }
+            }
             return JSONObject(bodyStr)
         }
     }
