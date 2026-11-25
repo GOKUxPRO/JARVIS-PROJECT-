@@ -17,7 +17,8 @@ class GeminiClient(private val apiKey: String) {
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    private val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey"
+    // Updated to a newer model that supports AQ. keys
+    private val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
     private val systemInstruction = """
@@ -154,6 +155,7 @@ class GeminiClient(private val apiKey: String) {
 
         val request = Request.Builder()
             .url(endpoint)
+            .addHeader("x-goog-api-key", apiKey) // New auth method
             .post(body.toString().toRequestBody(jsonType))
             .build()
 
