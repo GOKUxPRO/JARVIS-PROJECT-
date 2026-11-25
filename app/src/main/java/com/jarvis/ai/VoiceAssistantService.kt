@@ -1,7 +1,9 @@
 package com.jarvis.ai
 
 import android.app.*
+import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -18,9 +20,11 @@ import java.util.*
 class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
     private lateinit var speech: SpeechRecognizer
     private lateinit var tts: TextToSpeech
+    private lateinit var audioManager: AudioManager
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var gemini: GeminiClient
     private val history = mutableListOf<JSONObject>()
+    
     private var ttsReady = false
     private var isRunning = true
     private var isProcessing = false
@@ -31,7 +35,7 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
     private val wakeWords = listOf(
         "jarvis", "javis", "jervis", "jarves", "jarvish", "jarviss", "jarwis",
-        "जारविस", "जार्विस", "जारवीस", "जारवीस",
+        "जारविस", "जार्विस", "जारवीस",
         "જારવિસ", "જાર્વિસ", "જારવીસ"
     )
 
@@ -40,9 +44,11 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         val prefs = getSharedPreferences("jarvis", MODE_PRIVATE)
         val key = prefs.getString("api_key", "") ?: ""
         language = prefs.getString("language", "en-IN") ?: "en-IN"
-        Log.d("Jarvis", "Service started, lang=$language, keyLen=${key.length}")
+        
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         gemini = GeminiClient(key)
         tts = TextToSpeech(this, this)
+        
         startForeground(1, buildNotification("Initializing..."))
         setupSpeech()
     }
@@ -60,69 +66,51 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
             .setOngoing(true).build()
     }
 
+    // માઇકનો અવાજ બંધ કરવા માટે
+    private fun muteBeep() {
+        try {
+            audioManager.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_MUTE, 0)
+            audioManager.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_MUTE, 0)
+        } catch (e: Exception) {}
+    }
+
+    // અવાજ પાછો ચાલુ કરવા માટે
+    private fun unmuteBeep() {
+        try {
+            audioManager.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0)
+            audioManager.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_UNMUTE, 0)
+        } catch (e: Exception) {}
+    }
+
     private fun setupSpeech() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            Log.e("Jarvis", "Speech recognition NOT available on this device!")
-            speak("Speech recognition not available")
-            return
-        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) return
+        
         if (::speech.isInitialized) {
             try { speech.destroy() } catch (_: Exception) {}
         }
         speech = SpeechRecognizer.createSpeechRecognizer(this)
         speech.setRecognitionListener(object : RecognitionListener {
             override fun onResults(results: Bundle?) {
-                val texts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val text = texts?.firstOrNull() ?: ""
-                Log.d("Jarvis", "onResults: '$text'")
+                unmuteBeep()
+                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: ""
                 errorCount = 0
                 if (text.isNotEmpty()) handleResult(text) else scheduleRestart(true)
             }
-            override fun onPartialResults(p: Bundle?) {
-                val t = p?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                if (!t.isNullOrEmpty()) Log.d("Jarvis", "partial: '$t'")
-            }
             override fun onError(error: Int) {
-                Log.e("Jarvis", "onError: code=$error")
+                unmuteBeep()
                 if (isProcessing) return
-                when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH,
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                        // Normal - user didn't speak. Quiet restart.
-                        scheduleRestart(true)
-                    }
-                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-                        Log.w("Jarvis", "Recognizer busy - recreating after 2s")
-                        scope.launch {
-                            delay(2000)
-                            if (isRunning && !isProcessing) setupSpeech()
-                        }
-                    }
-                    SpeechRecognizer.ERROR_NETWORK,
-                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
-                        Log.e("Jarvis", "Network error - check internet")
-                        speak("Internet check karo")
-                        scheduleRestart(false)
-                    }
-                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
-                        Log.e("Jarvis", "Mic permission denied!")
-                        speak("Mic permission aapo")
-                    }
-                    SpeechRecognizer.ERROR_CLIENT -> {
-                        Log.w("Jarvis", "Client error - long wait")
-                        scope.launch {
-                            delay(3000)
-                            if (isRunning && !isProcessing) setupSpeech()
-                        }
-                    }
-                    else -> scheduleRestart(false)
+                if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                    scheduleRestart(true) // કંઈ ના બોલે તો ચૂપચાપ રીસ્ટાર્ટ
+                } else {
+                    scheduleRestart(false)
                 }
             }
-            override fun onReadyForSpeech(p: Bundle?) { Log.d("Jarvis", "Ready for speech") }
-            override fun onBeginningOfSpeech() { Log.d("Jarvis", "Speech started") }
+            override fun onReadyForSpeech(p: Bundle?) { unmuteBeep() }
+            override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(v: Float) {}
             override fun onBufferReceived(b: ByteArray?) {}
-            override fun onEndOfSpeech() { Log.d("Jarvis", "Speech ended") }
+            override fun onEndOfSpeech() {}
+            override fun onPartialResults(p: Bundle?) {}
             override fun onEvent(t: Int, p: Bundle?) {}
         })
         startListening()
@@ -130,17 +118,17 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
     private fun startListening() {
         if (!isRunning || isProcessing) return
+        muteBeep() // સ્ટાર્ટ કરતા પહેલા બીપ મ્યુટ કરો
+        
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
         }
         try {
-            Log.d("Jarvis", "startListening lang=$language")
             speech.startListening(intent)
         } catch (e: Exception) {
-            Log.e("Jarvis", "startListening exception", e)
+            unmuteBeep()
         }
     }
 
@@ -149,16 +137,10 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         restartJob?.cancel()
         restartJob = scope.launch {
             errorCount++
-            val backoff = if (quick) 500L else minOf(1500L * errorCount, 10000L)
+            val backoff = if (quick) 1000L else minOf(2000L * errorCount, 10000L)
             delay(backoff)
             if (isRunning && !isProcessing) {
-                if (errorCount >= 6) {
-                    Log.w("Jarvis", "Too many errors ($errorCount), recreating recognizer")
-                    errorCount = 0
-                    setupSpeech()
-                } else {
-                    startListening()
-                }
+                startListening()
             }
         }
     }
@@ -174,24 +156,20 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) { scheduleRestart(true); return }
 
-        Log.d("Jarvis", "handleResult: '$trimmed' activated=$activated")
-
         if (!activated) {
             val wake = findWakeWord(trimmed)
             if (wake != null) {
                 val idx = trimmed.lowercase(Locale.ROOT).indexOf(wake)
-                val cmd = trimmed.substring(idx + wake.length)
-                    .trim().trimStart(',', '.', ':', ' ', '!', '?', '-').trim()
+                val cmd = trimmed.substring(idx + wake.length).trim().trimStart(',', '.', ':', ' ', '!', '?', '-').trim()
+                
                 if (cmd.isNotEmpty()) {
-                    Log.d("Jarvis", "Wake + command: '$cmd'")
                     runCommand(cmd)
                 } else {
-                    speak("Yes?")
+                    // જ્યારે ફક્ત "Jarvis" બોલો ત્યારે "Bolo boss" કહેશે
+                    speak("Bolo boss")
                     activated = true
-                    startListening()
                 }
             } else {
-                Log.d("Jarvis", "No wake word, ignoring")
                 scheduleRestart(true)
             }
             return
@@ -201,7 +179,6 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         if (lower.contains("stop") || lower.contains("bye") || lower.contains("bandh")) {
             speak("Okay")
             activated = false
-            scheduleRestart(true)
             return
         }
         runCommand(trimmed)
@@ -212,57 +189,52 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         restartJob?.cancel()
         scope.launch {
             try {
-                Log.d("Jarvis", "Gemini command: '$cmd'")
                 val resp = gemini.processCommand(cmd, history) { action, target ->
-                    JarvisAccessibilityService.instance?.executeAction(action, target)
-                        ?: "Accessibility service not enabled"
+                    JarvisAccessibilityService.instance?.executeAction(action, target) ?: "Accessibility off"
                 }
-                Log.d("Jarvis", "Gemini response: '$resp'")
                 speak(resp)
             } catch (e: Exception) {
-                Log.e("Jarvis", "Command error", e)
                 speak("Error occurred")
             } finally {
                 activated = false
                 isProcessing = false
-                // Wait a moment for TTS to finish before listening again
-                scope.launch { delay(800); scheduleRestart(true) }
             }
         }
     }
 
     private fun speak(text: String) {
         if (text.isNullOrBlank()) return
-        try {
-            val id = "j${System.currentTimeMillis()}"
-            val result = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
-            Log.d("Jarvis", "speak('$text') -> $result, ttsReady=$ttsReady")
-        } catch (e: Exception) {
-            Log.e("Jarvis", "speak exception", e)
-        }
+        val id = "j${System.currentTimeMillis()}"
+        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
     }
 
     override fun onInit(status: Int) {
-        Log.d("Jarvis", "TTS onInit status=$status")
         if (status == TextToSpeech.SUCCESS) {
             try {
                 val locale = Locale.forLanguageTag(language)
                 val langResult = tts.setLanguage(locale)
-                Log.d("Jarvis", "setLanguage($language) -> $langResult")
-                if (langResult == TextToSpeech.LANG_MISSING_DATA ||
-                    langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    Log.w("Jarvis", "Language unsupported, falling back to en-US")
+                if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
                     tts.setLanguage(Locale.US)
                 }
-                tts.setSpeechRate(0.95f)
                 ttsReady = true
             } catch (e: Exception) {
-                Log.e("Jarvis", "TTS setup error, using default", e)
-                try { tts.setLanguage(Locale.US); ttsReady = true } catch (_: Exception) {}
+                tts.setLanguage(Locale.US)
+                ttsReady = true
             }
-        } else {
-            Log.e("Jarvis", "TTS init FAILED status=$status")
-            ttsReady = false
+            
+            // TTS પૂરું થાય પછી જ માઇક ચાલુ કરવા માટે
+            tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {}
+                override fun onDone(utteranceId: String?) {
+                    scope.launch {
+                        delay(600) // અવાજ પૂરો થાય પછી થોડી વાર રાહ જુઓ
+                        if (isRunning && !isProcessing) startListening()
+                    }
+                }
+                override fun onError(utteranceId: String?) {
+                    if (isRunning && !isProcessing) startListening()
+                }
+            })
         }
     }
 
