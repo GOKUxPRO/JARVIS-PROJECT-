@@ -53,8 +53,15 @@ class MainActivity : AppCompatActivity() {
 
         b.saveKeyBtn.setOnClickListener {
             val key = b.apiKeyInput.text.toString().trim()
-            if (key.length < 30 || !key.startsWith("AIza")) {
-                Toast.makeText(this, "Invalid API key (AIza thi shuru thavu joie)", Toast.LENGTH_LONG).show()
+            // Accept both old (AIza...) and new (AQ....) Gemini API key formats
+            val isValidFormat = (key.startsWith("AIza") && key.length >= 30) ||
+                                (key.startsWith("AQ.") && key.length >= 30)
+            if (!isValidFormat) {
+                Toast.makeText(
+                    this,
+                    "Invalid key format. Should start with 'AIza' or 'AQ.' and be at least 30 chars",
+                    Toast.LENGTH_LONG
+                ).show()
                 return@setOnClickListener
             }
             prefs.edit().putString("api_key", key).apply()
